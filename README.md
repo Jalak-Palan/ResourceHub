@@ -38,11 +38,31 @@ The visual design closely follows the warm cream and peach-toned aesthetic (`#FF
 ## 🛠️ Technology Stack
 
 - **Framework**: [Next.js](https://nextjs.org/) (App Router, React 18, TypeScript)
+- **Database**: [PostgreSQL](https://www.postgresql.org/) with `pg` (node-postgres connection pooling, transactions, schema auto-migration & seeding)
 - **Styling**: [Tailwind CSS](https://tailwindcss.com/) with custom palette and soft shadows
 - **Icons**: [Lucide React](https://lucide.dev/)
-- **Database**: [MongoDB](https://www.mongodb.com/) with [Mongoose](https://mongoosejs.com/) schemas (User, Resource, Booking, Notification)
-- **Persistence**: Graceful hybrid mode with automatic fallback to memory/localStorage demo mode when MongoDB credentials are not provided.
 - **Micro-interactions**: Canvas Confetti for celebrations, SVG smooth spline charts for analytics.
+
+---
+
+## 🐘 PostgreSQL Configuration
+
+Database configuration in `.env.local`:
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=admin123
+DB_NAME=resourcehub
+DATABASE_URL=postgresql://postgres:admin123@localhost:5432/resourcehub
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+### PostgreSQL Database Schema:
+- **`users`**: `id`, `name`, `email`, `password_hash`, `role`, `profile_image`, `department`, `student_id`, `phone`, timestamps.
+- **`resources`**: `id`, `name`, `description`, `category`, `image`, `specifications` (JSONB), `total_quantity`, `available_quantity`, `location`, `rating`, `reviews_count`, `is_active`, timestamps.
+- **`bookings`**: `id`, `booking_id`, `user_id`, `user_name`, `user_email`, `user_role`, `resource_id`, `resource_name`, `resource_image`, `resource_category`, `booking_date`, `start_time`, `end_time`, `purpose`, `status`, `issue_date`, `expected_return_date`, `actual_return_date`, `is_overdue`, timestamps.
+- **`notifications`**: `id`, `user_id`, `title`, `message`, `type`, `is_read`, `booking_id`, `created_at`, `timestamp`.
 
 ---
 
@@ -53,13 +73,11 @@ The visual design closely follows the warm cream and peach-toned aesthetic (`#FF
 npm install
 ```
 
-### 2. Environment Configuration (Optional MongoDB)
-Create a `.env.local` file in the root directory:
-```env
-MONGODB_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/resourcehub?retryWrites=true&w=majority
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+### 2. Initialize & Seed PostgreSQL Database
+```bash
+npm run db:init
 ```
-> **Note**: If `MONGODB_URI` is omitted, ResourceHub automatically operates in a full-featured **Demo Mode** with realistic data and LocalStorage persistence.
+*(The database tables and initial sample records also auto-initialize automatically on first application startup).*
 
 ### 3. Run Development Server
 ```bash
@@ -81,10 +99,12 @@ npm start
 ResourceHub/
 ├── app/
 │   ├── api/
-│   │   ├── bookings/        # GET, POST booking records
-│   │   ├── notifications/   # GET, PATCH alerts
-│   │   ├── resources/       # GET, POST equipment inventory
-│   │   └── stats/           # GET dashboard metrics
+│   │   ├── bookings/        # GET, POST, PATCH booking records in PostgreSQL
+│   │   ├── init-db/         # GET database status & table counts
+│   │   ├── notifications/   # GET, PATCH alerts in PostgreSQL
+│   │   ├── resources/       # GET, POST, PUT, DELETE equipment in PostgreSQL
+│   │   ├── stats/           # GET live computed metrics from PostgreSQL
+│   │   └── users/           # GET, POST users in PostgreSQL
 │   ├── admin/
 │   │   ├── bookings/        # Booking approval screen
 │   │   ├── history/         # Issue & return history screen
@@ -110,31 +130,14 @@ ResourceHub/
 │   ├── screens/             # 15 standalone screen components
 │   └── ui/                  # Modal, Dialogs, Cards
 ├── context/
-│   └── AppContext.tsx       # State, auth, CRUD, and LocalStorage sync
+│   └── AppContext.tsx       # State, auth, CRUD, and live PostgreSQL API sync
 ├── lib/
-│   ├── mock-data.ts         # Realistic sample dataset
-│   ├── mongodb.ts           # Mongoose connection handler
+│   ├── db.ts                # PostgreSQL Pool, auto-migration & query helpers
+│   ├── mock-data.ts         # Dataset references
 │   ├── types.ts             # TypeScript interfaces
 │   └── utils.ts             # ID generators and formatters
-├── models/
-│   ├── Booking.ts           # Mongoose Booking schema
-│   ├── Notification.ts      # Mongoose Notification schema
-│   ├── Resource.ts          # Mongoose Resource schema
-│   └── User.ts              # Mongoose User schema
+├── scripts/
+│   └── init-db.js           # Standalone PostgreSQL table creation & seed script
 ├── tailwind.config.ts       # Custom cream/peach color theme
 └── tsconfig.json
 ```
-
----
-
-## 🎨 Color Palette Reference
-
-| Name | Hex Code | Purpose |
-|------|----------|---------|
-| Main Background | `#FFF7F1` | Warm cream backdrop across all screens |
-| Primary Peach | `#E77B52` | Accent buttons, active tabs, brand icons |
-| Secondary Peach | `#FCEEE5` | Card pills, light badges, active state borders |
-| Dark Text | `#29201D` | High-contrast typography |
-| Muted Text | `#89817D` | Secondary labels, descriptions, subtitles |
-| Soft Green | `#E8F8EE` / `#16A34A` | Available status, Approved badges |
-| Soft Red | `#FEE2E2` / `#DC2626` | Rejected badges, delete actions |

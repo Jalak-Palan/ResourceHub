@@ -44,10 +44,10 @@ interface AppContextType {
   switchUserRole: (role: UserRole) => void;
   
   // Resource actions
-  addResource: (resource: Omit<Resource, 'id'>) => void;
-  updateResource: (id: string, updates: Partial<Resource>) => void;
-  deleteResource: (id: string) => void;
-  toggleResourceActive: (id: string) => void;
+  addResource: (resource: Omit<Resource, 'id'>) => Promise<void>;
+  updateResource: (id: string, updates: Partial<Resource>) => Promise<void>;
+  deleteResource: (id: string) => Promise<void>;
+  toggleResourceActive: (id: string) => Promise<void>;
   
   // Booking actions
   createBooking: (bookingData: {
@@ -57,12 +57,12 @@ interface AppContextType {
     endTime: string;
     purpose: string;
   }) => { success: boolean; booking?: Booking; error?: string };
-  updateBookingStatus: (bookingId: string, status: BookingStatus, reason?: string) => void;
-  markAsReturned: (bookingId: string) => void;
+  updateBookingStatus: (bookingId: string, status: BookingStatus, reason?: string) => Promise<void>;
+  markAsReturned: (bookingId: string) => Promise<void>;
   
   // Notifications
-  markNotificationAsRead: (id: string) => void;
-  markAllNotificationsAsRead: () => void;
+  markNotificationAsRead: (id: string) => Promise<void>;
+  markAllNotificationsAsRead: () => Promise<void>;
   
   // Stats
   getStats: () => DashboardStats;
@@ -77,10 +77,6 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
   USER: 'rh_current_user',
-  USERS: 'rh_users',
-  RESOURCES: 'rh_resources',
-  BOOKINGS: 'rh_bookings',
-  NOTIFICATIONS: 'rh_notifications',
   FAVORITES: 'rh_favorites',
   VIEW_MODE: 'rh_view_mode',
 };
@@ -98,46 +94,63 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activeScreenId, setActiveScreenId] = useState<string>('welcome');
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // Initialize from LocalStorage
+  // Fetch live data directly from PostgreSQL on initial load
   useEffect(() => {
+    async function loadDataFromPostgreSQL() {
+      try {
+        const [resResp, bookResp, notifResp, userResp] = await Promise.all([
+          fetch('/api/resources').then((r) => r.json()).catch(() => null),
+          fetch('/api/bookings').then((r) => r.json()).catch(() => null),
+          fetch('/api/notifications').then((r) => r.json()).catch(() => null),
+          fetch('/api/users').then((r) => r.json()).catch(() => null),
+        ]);
+
+        if (resResp?.success && Array.isArray(resResp.data) && resResp.data.length > 0) {
+          setResources(resResp.data);
+        }
+        if (bookResp?.success && Array.isArray(bookResp.data) && bookResp.data.length > 0) {
+          setBookings(bookResp.data);
+        }
+        if (notifResp?.success && Array.isArray(notifResp.data) && notifResp.data.length > 0) {
+          setNotifications(notifResp.data);
+        }
+        if (userResp?.success && Array.isArray(userResp.data) && userResp.data.length > 0) {
+          setUsers(userResp.data);
+        }
+      } catch (err) {
+        console.warn('Could not fetch from PostgreSQL API, using initial state:', err);
+      } finally {
+        setIsLoaded(true);
+      }
+    }
+
+    // Load user preferences from LocalStorage
     try {
       const storedUser = localStorage.getItem(STORAGE_KEYS.USER);
-      const storedUsers = localStorage.getItem(STORAGE_KEYS.USERS);
-      const storedResources = localStorage.getItem(STORAGE_KEYS.RESOURCES);
-      const storedBookings = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
-      const storedNotifications = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
       const storedFavorites = localStorage.getItem(STORAGE_KEYS.FAVORITES);
       const storedViewMode = localStorage.getItem(STORAGE_KEYS.VIEW_MODE);
 
       if (storedUser) setCurrentUser(JSON.parse(storedUser));
-      if (storedUsers) setUsers(JSON.parse(storedUsers));
-      if (storedResources) setResources(JSON.parse(storedResources));
-      if (storedBookings) setBookings(JSON.parse(storedBookings));
-      if (storedNotifications) setNotifications(JSON.parse(storedNotifications));
       if (storedFavorites) setFavorites(JSON.parse(storedFavorites));
       if (storedViewMode) setViewMode(storedViewMode as any);
     } catch (e) {
-      console.warn('LocalStorage error, using initial defaults:', e);
-    } finally {
-      setIsLoaded(true);
+      // ignore
     }
+
+    loadDataFromPostgreSQL();
   }, []);
 
-  // Save to LocalStorage
+  // Save UI preferences to LocalStorage
   useEffect(() => {
     if (!isLoaded) return;
     try {
       localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-      localStorage.setItem(STORAGE_KEYS.RESOURCES, JSON.stringify(resources));
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications));
       localStorage.setItem(STORAGE_KEYS.FAVORITES, JSON.stringify(favorites));
       localStorage.setItem(STORAGE_KEYS.VIEW_MODE, viewMode);
     } catch (e) {
-      console.error('Failed to sync state to LocalStorage', e);
+      console.error('Failed to sync preferences to LocalStorage', e);
     }
-  }, [currentUser, users, resources, bookings, notifications, favorites, viewMode, isLoaded]);
+  }, [currentUser, favorites, viewMode, isLoaded]);
 
   const switchUserRole = (role: UserRole) => {
     const existing = users.find((u) => u.role === role);
@@ -167,15 +180,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     );
   };
 
-  // Resources
-  const addResource = (res: Omit<Resource, 'id'>) => {
+  // Resources - PostgreSQL CRUD
+  const addResource = async (res: Omit<Resource, 'id'>) => {
+    const tempId = `res-${Date.now()}`;
     const newResource: Resource = {
       ...res,
-      id: `res-${Date.now()}`,
+      id: tempId,
     };
     setResources((prev) => [newResource, ...prev]);
 
-    // Admin notification
+    try {
+      const resp = await fetch('/api/resources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(res),
+      });
+      const data = await resp.json();
+      if (data.success && data.data) {
+        setResources((prev) => prev.map((r) => (r.id === tempId ? data.data : r)));
+      }
+    } catch (err) {
+      console.error('Failed to add resource in PostgreSQL:', err);
+    }
+
+    // Refresh notifications
     const newNotif: NotificationItem = {
       id: `notif-${Date.now()}`,
       userId: currentUser.id,
@@ -188,23 +216,55 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setNotifications((prev) => [newNotif, ...prev]);
   };
 
-  const updateResource = (id: string, updates: Partial<Resource>) => {
+  const updateResource = async (id: string, updates: Partial<Resource>) => {
     setResources((prev) =>
       prev.map((r) => (r.id === id ? { ...r, ...updates } : r))
     );
+
+    try {
+      await fetch(`/api/resources/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+    } catch (err) {
+      console.error('Failed to update resource in PostgreSQL:', err);
+    }
   };
 
-  const deleteResource = (id: string) => {
+  const deleteResource = async (id: string) => {
     setResources((prev) => prev.filter((r) => r.id !== id));
+
+    try {
+      await fetch(`/api/resources/${id}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.error('Failed to delete resource in PostgreSQL:', err);
+    }
   };
 
-  const toggleResourceActive = (id: string) => {
+  const toggleResourceActive = async (id: string) => {
+    const target = resources.find((r) => r.id === id);
+    if (!target) return;
+    const newActive = !target.isActive;
+
     setResources((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, isActive: !r.isActive } : r))
+      prev.map((r) => (r.id === id ? { ...r, isActive: newActive } : r))
     );
+
+    try {
+      await fetch(`/api/resources/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: newActive }),
+      });
+    } catch (err) {
+      console.error('Failed to toggle resource active state in PostgreSQL:', err);
+    }
   };
 
-  // Bookings
+  // Bookings - PostgreSQL CRUD
   const createBooking = (bookingData: {
     resourceId: string;
     bookingDate: string;
@@ -224,7 +284,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       };
     }
 
-    // Check overlap for the exact resource
     const hasOverlap = bookings.some(
       (b) =>
         b.resourceId === bookingData.resourceId &&
@@ -233,7 +292,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         b.startTime === bookingData.startTime
     );
 
-    // If available units is only 1 and slot taken
     if (hasOverlap && targetResource.availableQuantity <= 1) {
       return {
         success: false,
@@ -261,9 +319,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       createdAt: new Date().toISOString(),
     };
 
+    // Optimistic UI updates
     setBookings((prev) => [newBooking, ...prev]);
-
-    // Decrement available quantity temporarily while reserved or pending
     setResources((prev) =>
       prev.map((r) =>
         r.id === targetResource.id
@@ -272,7 +329,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
       )
     );
 
-    // Notify user & admins
+    // Call PostgreSQL endpoint
+    fetch('/api/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...bookingData,
+        userId: currentUser.id,
+        userName: currentUser.name,
+        userEmail: currentUser.email,
+        userRole: currentUser.role,
+        bookingId: newBookingId,
+      }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && data.data) {
+          setBookings((prev) => prev.map((b) => (b.bookingId === newBookingId ? data.data : b)));
+        }
+      })
+      .catch((err) => console.error('Error persisting booking in PostgreSQL:', err));
+
+    // Optimistic notification
     const userNotif: NotificationItem = {
       id: `notif-${Date.now()}-user`,
       userId: currentUser.id,
@@ -284,29 +362,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       createdAt: 'Just now',
     };
 
-    const adminNotif: NotificationItem = {
-      id: `notif-${Date.now()}-admin`,
-      userId: 'user-3', // admin
-      title: 'New booking request',
-      message: `${currentUser.name} requested ${targetResource.name} on ${bookingData.bookingDate}. Needs approval.`,
-      type: 'new_request',
-      isRead: false,
-      bookingId: newBookingId,
-      createdAt: 'Just now',
-    };
-
-    setNotifications((prev) => [userNotif, adminNotif, ...prev]);
+    setNotifications((prev) => [userNotif, ...prev]);
 
     return { success: true, booking: newBooking };
   };
 
-  const updateBookingStatus = (bookingId: string, status: BookingStatus, reason?: string) => {
+  const updateBookingStatus = async (bookingId: string, status: BookingStatus, reason?: string) => {
     setBookings((prev) =>
       prev.map((b) => {
         if (b.bookingId === bookingId) {
           const isNowApproved = status === 'approved';
-          const isNowRejected = status === 'rejected';
-
           return {
             ...b,
             status,
@@ -323,7 +388,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const booking = bookings.find((b) => b.bookingId === bookingId);
     if (!booking) return;
 
-    // If rejected or cancelled, restore quantity
     if (status === 'rejected' || status === 'cancelled') {
       setResources((prev) =>
         prev.map((r) =>
@@ -334,7 +398,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     }
 
-    // Notify user
+    try {
+      await fetch('/api/bookings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId, status, reason }),
+      });
+    } catch (err) {
+      console.error('Error updating booking in PostgreSQL:', err);
+    }
+
     const notifTitle =
       status === 'approved'
         ? 'Your booking is approved'
@@ -363,7 +436,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setNotifications((prev) => [statusNotif, ...prev]);
   };
 
-  const markAsReturned = (bookingId: string) => {
+  const markAsReturned = async (bookingId: string) => {
     const todayStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
     
     setBookings((prev) =>
@@ -382,7 +455,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     const booking = bookings.find((b) => b.bookingId === bookingId);
     if (booking) {
-      // Increment available resource quantity
       setResources((prev) =>
         prev.map((r) =>
           r.id === booking.resourceId
@@ -391,7 +463,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         )
       );
 
-      // Notification
+      try {
+        await fetch('/api/bookings', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bookingId, isReturned: true }),
+        });
+      } catch (err) {
+        console.error('Error marking returned in PostgreSQL:', err);
+      }
+
       const returnNotif: NotificationItem = {
         id: `notif-${Date.now()}`,
         userId: booking.userId,
@@ -406,14 +487,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const markNotificationAsRead = (id: string) => {
+  const markNotificationAsRead = async (id: string) => {
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
     );
+
+    try {
+      await fetch('/api/notifications', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+    } catch (err) {
+      console.error('Error marking notification read in PostgreSQL:', err);
+    }
   };
 
-  const markAllNotificationsAsRead = () => {
+  const markAllNotificationsAsRead = async () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
+
+    try {
+      await fetch('/api/notifications', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markAll: true, userId: currentUser.id }),
+      });
+    } catch (err) {
+      console.error('Error marking all notifications read in PostgreSQL:', err);
+    }
   };
 
   const getStats = (): DashboardStats => {
@@ -440,7 +541,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCurrentUser(found);
       return true;
     }
-    // create and log in
     const newUser: User = {
       id: `user-${Date.now()}`,
       name: email.split('@')[0],
@@ -450,6 +550,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     setUsers((prev) => [...prev, newUser]);
     setCurrentUser(newUser);
+
+    // Save to PostgreSQL
+    fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newUser),
+    }).catch((err) => console.error('Error persisting user to PostgreSQL:', err));
+
     return true;
   };
 
@@ -463,11 +571,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     setUsers((prev) => [...prev, newUser]);
     setCurrentUser(newUser);
+
+    // Save to PostgreSQL
+    fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newUser),
+    }).catch((err) => console.error('Error persisting user to PostgreSQL:', err));
+
     return newUser;
   };
 
   const logout = () => {
-    // reset to student guest/demo
     setCurrentUser(INITIAL_USERS[0]);
   };
 
